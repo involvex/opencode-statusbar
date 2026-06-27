@@ -1,217 +1,316 @@
-import {Plugin, PluginInput} from '@opencode-ai/plugin'
+import type {Plugin, PluginInput} from '@opencode-ai/plugin'
+import {tool} from '@opencode-ai/plugin'
 
-/**
- * OpencodeStatusbarPlugin - OpenCode Plugin
- *
- * Documentation: https://opencode.ai/docs/plugins/
- * SDK Reference: https://opencode.ai/docs/sdk/
- * Community Plugins: https://opencode.ai/docs/ecosystem/#plugins
- */
-export const OpencodeStatusbarPlugin: Plugin = async (_ctx: PluginInput) => {
-	// _ctx provides:
-	// - client: OpenCode SDK client for API calls
-	// - project: Current project information
-	// - directory: Current working directory
-	// - worktree: Git worktree path
-	// - serverUrl: OpenCode server URL
-	// - $: Bun shell for executing commands
-	//
-	// Rename to `ctx` when you start using it.
+interface StatusInfo {
+	git: {
+		branch: string
+		remote: string | null
+		remoteBranch: string | null
+		isDirty: boolean
+		ahead: number
+		behind: number
+	}
+	system: {
+		cpuPercent: number
+		ramUsedPercent: number
+		ramUsedGB: number
+		ramTotalGB: number
+	}
+	session: {
+		tokenUsed: number
+		contextUsed: number
+		contextLimit: number
+	}
+}
 
-	console.log('[opencode-statusbar] plugin initialized')
+export const OpencodeStatusbarPlugin: Plugin = async (ctx: PluginInput) => {
+	const state = {
+		tokenUsed: 0,
+		contextUsed: 0,
+		contextLimit: 128_000,
+	}
+
+	async function getGitStatus(): Promise<StatusInfo['git']> {
+		try {
+			const branch = await ctx.$`git branch --show-current`
+				.text()
+				.catch(() => 'unknown')
+			const remoteUrl =
+				await ctx.$`git remote get-url origin 2>/dev/null || echo ""`
+					.text()
+					.catch(() => '')
+			const trackingBranch =
+				await ctx.$`git rev-parse --abbrev-ref @{upstream} 2>/dev/null || echo ""`
+					.text()
+					.catch(() => '')
+			const status = await ctx.$`git status --porcelain`.text().catch(() => '')
+			const revList =
+				await ctx.$`git rev-list --left-right --count HEAD...@{upstream} 2>/dev/null || echo "0 0"`
+					.text()
+					.catch(() => '0 0')
+
+			const [ahead, behind] = revList.trim().split(/\s+/).map(Number)
+
+			return {
+				branch: branch.trim() || 'unknown',
+				remote: remoteUrl.trim() || null,
+				remoteBranch: trackingBranch.trim() || null,
+				isDirty: status.trim().length > 0,
+				ahead: isNaN(ahead) ? 0 : ahead,
+				behind: isNaN(behind) ? 0 : behind,
+			}
+		} catch {
+			return {
+				branch: 'unknown',
+				remote: null,
+				remoteBranch: null,
+				isDirty: false,
+				ahead: 0,
+				behind: 0,
+			}
+		}
+	}
+
+	async function getSystemStatus(): Promise<StatusInfo['system']> {
+		try {
+			if (process.platform === 'win32') {
+				const cpuOutput =
+					await ctx.$`powershell -Command "(Get-CimInstance Win32_Processor).LoadPercentage"`
+						.text()
+						.catch(() => '0')
+				const ramOutput =
+					await ctx.$`powershell -Command "$os = Get-CimInstance Win32_OperatingSystem; [math]::Round(($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1MB, 2), [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)"`
+						.text()
+						.catch(() => '0 0')
+
+				const [usedGB, totalGB] = ramOutput.trim().split(/\s+/).map(Number)
+				const usedPercent =
+					totalGB > 0 ? Math.round((usedGB / totalGB) * 100) : 0
+
+				return {
+					cpuPercent: parseInt(cpuOutput.trim(), 10) || 0,
+					ramUsedPercent: usedPercent || 0,
+					ramUsedGB: isNaN(usedGB) ? 0 : usedGB,
+					ramTotalGB: isNaN(totalGB) ? 0 : totalGB,
+				}
+			} else {
+				const cpuOutput =
+					await ctx.$`top -l 1 -n 1 | grep "CPU usage" | awk '{print $3}' | tr -d '%'`
+						.text()
+						.catch(() => '0')
+				const vmStats =
+					await ctx.$`vm_stat | grep "Pages active\|Pages wired down" | awk '{print $NF}' | tr -d '.'`
+						.text()
+						.catch(() => '0 0')
+				const memTotal = await ctx.$`sysctl -n hw.memsize 2>/dev/null || echo 0`
+					.text()
+					.catch(() => '0')
+				const pagesize = await ctx.$`getconf PAGESIZE 2>/dev/null || echo 4096`
+					.text()
+					.catch(() => '4096')
+
+				const totalBytes = parseInt(memTotal.trim(), 10) || 0
+				const totalGB =
+					Math.round((totalBytes / 1024 / 1024 / 1024) * 100) / 100
+				const pageSize = parseInt(pagesize.trim(), 10) || 4096
+				const activePages = vmStats
+					.trim()
+					.split(/\s+/)
+					.map(p => parseInt(p, 10) || 0)
+				const usedBytes = activePages.reduce(
+					(sum, pages) => sum + pages * pageSize,
+					0,
+				)
+				const usedGB = Math.round((usedBytes / 1024 / 1024 / 1024) * 100) / 100
+				const usedPercent =
+					totalGB > 0 ? Math.round((usedGB / totalGB) * 100) : 0
+
+				return {
+					cpuPercent: parseInt(cpuOutput.trim(), 10) || 0,
+					ramUsedPercent: usedPercent,
+					ramUsedGB: usedGB,
+					ramTotalGB: totalGB,
+				}
+			}
+		} catch {
+			return {
+				cpuPercent: 0,
+				ramUsedPercent: 0,
+				ramUsedGB: 0,
+				ramTotalGB: 0,
+			}
+		}
+	}
+
+	async function getStatus(): Promise<StatusInfo> {
+		const [git, system] = await Promise.all([getGitStatus(), getSystemStatus()])
+
+		return {
+			git,
+			system,
+			session: {
+				tokenUsed: state.tokenUsed,
+				contextUsed: state.contextUsed,
+				contextLimit: state.contextLimit,
+			},
+		}
+	}
+
+	async function showStatusNotification(): Promise<void> {
+		const status = await getStatus()
+
+		const parts: string[] = []
+
+		parts.push(`Git: ${status.git.branch}${status.git.isDirty ? ' (*)' : ''}`)
+		if (status.git.remoteBranch) {
+			parts.push(`\u2192 ${status.git.remoteBranch}`)
+			if (status.git.ahead > 0 || status.git.behind > 0) {
+				parts.push(` (\u2191${status.git.ahead} \u2193${status.git.behind})`)
+			}
+		}
+
+		parts.push(`| CPU: ${status.system.cpuPercent}%`)
+		parts.push(
+			`RAM: ${status.system.ramUsedGB}/${status.system.ramTotalGB}GB (${status.system.ramUsedPercent}%)`,
+		)
+
+		if (status.session.contextUsed > 0) {
+			const contextPercent = Math.round(
+				(status.session.contextUsed / status.session.contextLimit) * 100,
+			)
+			parts.push(`| Context: ${contextPercent}%`)
+		}
+
+		const message = parts.join(' ')
+
+		await ctx.client.tui.showToast({
+			body: {
+				message,
+				variant: 'info',
+			},
+		})
+	}
+
+	async function updateSessionMetrics(): Promise<void> {
+		state.contextUsed = Math.round(state.tokenUsed * 3.5)
+	}
 
 	return {
-		// ============================================================
-		// EVENT HOOKS
-		// ============================================================
+		event: async ({event}) => {
+			if (
+				event.type === 'session.created' ||
+				event.type === 'session.updated' ||
+				event.type === 'session.idle'
+			) {
+				await updateSessionMetrics()
+			}
+		},
 
-		/**
-		 * Subscribe to OpenCode events
-		 * Events: session.idle, session.error, file.edited, tool.execute.after, etc.
-		 * Full list: https://opencode.ai/docs/plugins/#events
-		 *
-		 * input: { event: Event }
-		 */
-		event: async ({event: _event}) => {},
+		tool: {
+			status: tool({
+				description:
+					'Display current statusbar information including git status, system metrics, and session info',
+				args: {},
+				async execute() {
+					const status = await getStatus()
 
-		/**
-		 * Called when config is loaded
-		 * Use to modify or react to configuration changes
-		 *
-		 * input: Config
-		 */
-		config: async _config => {},
+					const gitInfo = [
+						`Branch: ${status.git.branch}`,
+						status.git.remote
+							? `Remote: ${status.git.remote}`
+							: 'No remote configured',
+						status.git.remoteBranch
+							? `Tracking: ${status.git.remoteBranch}`
+							: '',
+						status.git.isDirty ? 'Status: Modified' : 'Status: Clean',
+						status.git.ahead > 0 || status.git.behind > 0
+							? `Sync: \u2191${status.git.ahead} \u2193${status.git.behind}`
+							: '',
+					]
+						.filter(Boolean)
+						.join('\n  ')
 
-		// ============================================================
-		// CHAT HOOKS
-		// ============================================================
+					const sysInfo = [
+						`CPU: ${status.system.cpuPercent}%`,
+						`RAM: ${status.system.ramUsedGB}GB / ${status.system.ramTotalGB}GB (${status.system.ramUsedPercent}%)`,
+					].join('\n  ')
 
-		/**
-		 * Called when a new user message is received
-		 * Use to modify the message or its parts before processing
-		 *
-		 * input: { sessionID, agent?, model?, messageID?, variant? }
-		 * output: { message: UserMessage, parts: Part[] }
-		 */
-		'chat.message': async (_input, _output) => {},
+					const sessionInfo = [
+						`Tokens: ${status.session.tokenUsed.toLocaleString()}`,
+						`Context: ${Math.round((status.session.contextUsed / status.session.contextLimit) * 100)}%`,
+					].join('\n  ')
 
-		/**
-		 * Modify LLM parameters (temperature, topP, topK)
-		 *
-		 * input: { sessionID, agent, model, provider, message }
-		 * output: { temperature, topP, topK, options }
-		 */
-		'chat.params': async (_input, _output) => {},
+					return `StatusBar Info
+==============
 
-		/**
-		 * Add custom headers to LLM requests
-		 *
-		 * input: { sessionID, agent, model, provider, message }
-		 * output: { headers: Record<string, string> }
-		 */
-		'chat.headers': async (_input, _output) => {},
+Git:
+  ${gitInfo}
 
-		/**
-		 * Transform messages before sending to AI (experimental)
-		 * Useful for image compression, content filtering, etc.
-		 *
-		 * input: {}
-		 * output: { messages: { info: Message, parts: Part[] }[] }
-		 */
-		'experimental.chat.messages.transform': async (_input, _output) => {},
+System:
+  ${sysInfo}
 
-		/**
-		 * Transform system prompt (experimental)
-		 *
-		 * input: { sessionID?, model }
-		 * output: { system: string[] }
-		 */
-		'experimental.chat.system.transform': async (_input, _output) => {},
+Session:
+  ${sessionInfo}
+`
+				},
+			}),
 
-		// ============================================================
-		// TOOL HOOKS
-		// ============================================================
+			'status.notify': tool({
+				description: 'Show statusbar as a toast notification',
+				args: {},
+				async execute() {
+					await showStatusNotification()
+					return 'Status notification shown'
+				},
+			}),
 
-		/**
-		 * Called before a tool executes
-		 * Use to modify arguments or prevent execution (throw error)
-		 *
-		 * input: { tool, sessionID, callID }
-		 * output: { args: any }
-		 */
-		'tool.execute.before': async (_input, _output) => {},
+			'status.show': tool({
+				description: 'Show statusbar notification with current metrics',
+				args: {},
+				async execute() {
+					const status = await getStatus()
 
-		/**
-		 * Called after a tool executes
-		 * Use to modify or log tool results
-		 *
-		 * input: { tool, sessionID, callID }
-		 * output: { title, output, metadata }
-		 */
-		'tool.execute.after': async (_input, _output) => {},
+					const parts: string[] = []
 
-		// ============================================================
-		// COMMAND HOOKS
-		// ============================================================
+					parts.push(
+						`Git: ${status.git.branch}${status.git.isDirty ? ' (*)' : ''}`,
+					)
+					if (status.git.remoteBranch) {
+						parts.push(`\u2192 ${status.git.remoteBranch}`)
+						if (status.git.ahead > 0 || status.git.behind > 0) {
+							parts.push(`\u2191${status.git.ahead} \u2193${status.git.behind}`)
+						}
+					}
 
-		/**
-		 * Called before a slash command executes
-		 *
-		 * input: { command, sessionID, arguments }
-		 * output: { parts: Part[] }
-		 */
-		'command.execute.before': async (_input, _output) => {},
+					parts.push(`| CPU: ${status.system.cpuPercent}%`)
+					parts.push(
+						`RAM: ${status.system.ramUsedGB}GB (${status.system.ramUsedPercent}%)`,
+					)
 
-		// ============================================================
-		// PERMISSION HOOKS
-		// ============================================================
+					if (status.session.contextUsed > 0) {
+						const pct = Math.round(
+							(status.session.contextUsed / status.session.contextLimit) * 100,
+						)
+						parts.push(`| Ctx: ${pct}%`)
+					}
 
-		/**
-		 * Intercept permission requests
-		 * Use to auto-allow/deny certain permissions
-		 *
-		 * input: Permission object
-		 * output: { status: 'ask' | 'deny' | 'allow' }
-		 */
-		'permission.ask': async (_input, _output) => {},
+					return parts.join(' ')
+				},
+			}),
+		},
 
-		// ============================================================
-		// SHELL HOOKS
-		// ============================================================
-
-		/**
-		 * Inject environment variables into shell commands
-		 *
-		 * input: { cwd }
-		 * output: { env: Record<string, string> }
-		 */
-		'shell.env': async (_input, _output) => {},
-
-		// ============================================================
-		// SESSION HOOKS
-		// ============================================================
-
-		/**
-		 * Customize session compaction (experimental)
-		 * Add context or replace the compaction prompt entirely
-		 *
-		 * input: { sessionID }
-		 * output: { context: string[], prompt?: string }
-		 */
-		'experimental.session.compacting': async (_input, _output) => {},
-
-		// ============================================================
-		// TEXT HOOKS
-		// ============================================================
-
-		/**
-		 * Called when text completion is done (experimental)
-		 *
-		 * input: { sessionID, messageID, partID }
-		 * output: { text }
-		 */
-		'experimental.text.complete': async (_input, _output) => {},
-
-		// ============================================================
-		// CUSTOM TOOLS
-		// ============================================================
-
-		/**
-		 * Register custom tools that the AI can call
-		 * Import { tool } from '@opencode-ai/plugin'
-		 *
-		 * Example:
-		 * tool: {
-		 *   mytool: tool({
-		 *     description: 'Description of what this tool does',
-		 *     args: { foo: tool.schema.string() },
-		 *     async execute(args, context) {
-		 *       return `Result: ${args.foo}`
-		 *     },
-		 *   }),
-		 * },
-		 */
-		// tool: {},
-
-		// ============================================================
-		// AUTH HOOKS (Advanced)
-		// ============================================================
-
-		/**
-		 * Custom authentication provider
-		 * Use to add OAuth or API key authentication for custom providers
-		 *
-		 * See: https://opencode.ai/docs/plugins/#auth-hooks
-		 */
-		// auth: {
-		//   provider: 'my-provider',
-		//   methods: [
-		//     {
-		//       type: 'api',
-		//       label: 'API Key',
-		//       authorize: async () => ({ type: 'success', key: 'xxx' }),
-		//     },
-		//   ],
-		// },
+		'tool.execute.after': async input => {
+			if (
+				input.tool === 'bash' ||
+				input.tool === 'read' ||
+				input.tool === 'edit'
+			) {
+				state.tokenUsed += 50
+				state.contextUsed = Math.min(
+					state.contextUsed + 100,
+					state.contextLimit,
+				)
+			}
+		},
 	}
 }

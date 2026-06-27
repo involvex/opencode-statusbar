@@ -8,7 +8,7 @@ Add to your `opencode.json` (global or per-project):
 
 ```json
 {
-	"plugin": ["opencode-statusbar@latest"]
+	"plugin": ["@involvex/opencode-statusbar@latest"]
 }
 ```
 
@@ -110,7 +110,7 @@ After publishing, users can install with:
 
 ```json
 {
-	"plugin": ["opencode-statusbar@latest"]
+	"plugin": ["@involvex/opencode-statusbar@latest"]
 }
 ```
 
