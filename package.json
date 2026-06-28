@@ -10,30 +10,52 @@
 	"license": "MIT",
 	"author": "involvex <39644169+involvex@users.noreply.github.com>",
 	"type": "module",
-	"main": "src/index.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
 	"files": [
+		"dist",
 		"src"
 	],
 	"scripts": {
+		"build": "tsup",
 		"check": "bun run format && bun run lint:fix && bun run typecheck",
-		"dev": "bun run dev.ts",
+		"dev": "bun run build && bun run dev.ts",
+		"dev:watch": "bun run build --watch",
 		"format": "prettier . --write",
-		"lint": "eslint .",
-		"lint:fix": "eslint . --fix",
+		"lint": "eslint src",
+		"lint:fix": "eslint src --fix",
 		"typecheck": "tsc --noEmit"
 	},
 	"prettier": "@involvex/prettier-config",
 	"dependencies": {
 		"@opencode-ai/plugin": "^1.17.11",
-		"@opencode-ai/sdk": "^1.17.11"
+		"@opencode-ai/sdk": "^1.17.11",
+		"@opentui/core": "^0.4.2",
+		"@opentui/solid": "^0.4.2",
+		"solid-js": "^1.9.12"
 	},
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
 		"@involvex/prettier-config": "0.0.5",
 		"@types/bun": "latest",
+		"@types/node": "^22.0.0",
+		"esbuild-plugin-solid": "^0.6.0",
 		"eslint": "^10.6.0",
 		"prettier": "3.9.1",
+		"tsup": "^8.3.0",
 		"typescript": "latest",
 		"typescript-eslint": "^8.62.0"
+	},
+	"peerDependencies": {
+		"@opencode-ai/plugin": ">=1.17.0 <2",
+		"@opentui/core": ">=0.4.0 <1",
+		"@opentui/solid": ">=0.4.0 <1",
+		"solid-js": ">=1.9.0 <2"
 	}
 }
